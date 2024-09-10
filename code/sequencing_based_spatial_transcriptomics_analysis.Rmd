@@ -1,0 +1,375 @@
+---
+title: "Visium Spatial Transcriptomics Data Analysis - Mouse Intestine"
+output:
+  html_document:
+    df_print: paged
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup}
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(warning = TRUE, message = TRUE, echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(DropletUtils)
+library(SpotClean)
+library(SpatialExperiment)
+library(scCustomize)
+library(clustree)
+library(CARD)
+library(MuSiC)
+library(corrplot)
+```
+
+## PARAMETERS
+
+```{r}
+visium_dir = "/project/shared/spatial_data_camp/datasets/DATASET1/VISIUM_V1_MOUSE_INTESTINE/spaceranger/SRR14083626_HEALTHY_DAY0/outs"
+```
+
+## LOAD DATA
+
+```{r}
+seurat <- Load10X_Spatial(visium_dir,
+                          filename = "raw_feature_bc_matrix.h5",
+                          slice="mouse_intestine_section1",
+                          filter.matrix = FALSE)
+```
+
+```{r}
+seurat
+```
+
+```{r}
+GetTissueCoordinates(seurat)
+```
+
+## READING IN AUTOMATED TISSUE DETECTION INFORMATION
+
+```{r}
+coords <- read.csv(file.path(visium_dir, "/spatial/tissue_positions.csv"))
+coords # Order of barcode not matching with Seurat object
+```
+
+```{r}
+str(coords)
+summary(coords)
+```
+
+```{r}
+rownames(coords) <- coords$barcode
+seurat$UnderTissue <- ifelse(coords[Cells(seurat), "in_tissue"], yes = "Under Tissue", no = "Outside Tissue")
+```
+
+## VISUALISING THE SECTION
+
+```{r}
+SpatialDimPlot(seurat, group.by="UnderTissue")
+```
+
+## QUALITY CONTROL BASICS
+
+```{r}
+SpatialFeaturePlot(seurat, "nCount_Spatial") + 
+  ggplot2::theme_minimal()
+```
+
+```{r}
+SpatialFeaturePlot(seurat, "nFeature_Spatial") + 
+  ggplot2::theme_minimal()
+```
+
+```{r}
+seurat <- PercentageFeatureSet(seurat, 
+                               pattern="^Rp", 
+                               col.name = "percent.rp")
+
+seurat <- PercentageFeatureSet(seurat, 
+                               pattern="^mt-", 
+                               col.name =  "percent.mt")
+```
+
+```{r}
+SpatialFeaturePlot(seurat, features = "percent.rp")
+SpatialFeaturePlot(seurat, features = "percent.mt")
+```
+
+```{r}
+seurat <- Add_Cell_QC_Metrics(seurat_object = seurat,
+                              species = "mouse", 
+                              assay = "Spatial", 
+                              overwrite = TRUE,
+                              add_cell_cycle = FALSE)
+
+head(seurat)
+```
+```{r}
+SpatialFeaturePlot(seurat, "log10GenesPerUMI" ) +
+QC_Histogram(seurat, features = "log10GenesPerUMI")
+```
+
+
+```{r}
+se <- readRDS("/project/shared/spatial_data_camp/datasets/PRECOMPUTED/spotclean.RDS")
+
+clean <- assays(se)[["decont"]]
+rownames(clean) <- rowData(se)$symbol 
+
+seurat[["SPOTCLEAN"]] <- CreateAssayObject(clean)
+seurat
+```
+```{r}
+seurat <- NormalizeData(seurat, assay = "Spatial")
+seurat <- NormalizeData(seurat, assay="SPOTCLEAN")
+```
+
+```{r}
+gene <- "Myh11"
+
+DefaultAssay(seurat) <- "Spatial"
+p1 <- SpatialFeaturePlot(seurat, features = gene)
+DefaultAssay(seurat) <- "SPOTCLEAN"
+p2 <- SpatialFeaturePlot(seurat, features = gene)
+
+p1 + p2
+```
+
+```{r}
+seurat$SpotFilter <- seurat$nFeature_Spatial > 1500 
+SpatialDimPlot(seurat, group.by = "SpotFilter")
+```
+
+## CLUSTERING ANALYSIS
+
+```{r}
+seurat <- subset(seurat, UnderTissue == "Under Tissue" & SpotFilter)
+```
+```{r}
+seurat <- SCTransform(seurat, assay="SPOTCLEAN", return.only.var.genes = FALSE)
+```
+
+```{r}
+gene <- "Myh11"
+p1 <- SpatialFeaturePlot(seurat, gene, slot="data") # Normalised counts
+p2 <- SpatialFeaturePlot(seurat, gene, slot="counts") # Raw counts
+
+p1 + p2
+```
+```{r}
+seurat <- RunPCA(seurat)
+```
+
+```{r}
+ElbowPlot(seurat, 50)
+```
+
+```{r fig.height=10, fig.width=7}
+PC_Plotting(seurat, dim_number = 1)
+PC_Plotting(seurat, dim_number = 10)
+PC_Plotting(seurat, dim_number = 30)
+```
+```{r}
+SpatialFeaturePlot(seurat, "PC_1", pt.size.factor = 2)
+SpatialFeaturePlot(seurat, "PC_10", pt.size.factor = 2)
+```
+
+```{r}
+seurat <- FindNeighbors(seurat, dims = 1:12)
+seurat <- FindClusters(seurat, resolution = .5)
+```
+
+```{r}
+seurat <- RunUMAP(seurat, dims = 1:12)
+```
+
+```{r}
+DimPlot(seurat, label=T, repel=T)
+```
+
+```{r}
+SpatialDimPlot(seurat, pt.size.factor = 2)
+```
+
+```{r}
+seurat <- FindClusters(seurat, resolution = .1)
+DimPlot(seurat, label=T, repel=T)
+SpatialDimPlot(seurat, pt.size.factor = 2)
+```
+
+```{r}
+seurat <- FindClusters(seurat, resolution = 1)
+DimPlot(seurat, label=T, repel=T)
+SpatialDimPlot(seurat, pt.size.factor = 2)
+```
+
+```{r fig.height=10, fig.width=7}
+clustree(seurat)
+clustree(seurat,  node_colour = "sc3_stability")
+```
+
+## IDENTIFYING MARKER GENES FOR SPATIAL REGIONS
+
+```{r}
+markers.cl1 <- FindMarkers(seurat, ident.1="1")
+```
+
+```{r}
+SpatialFeaturePlot(seurat, "Nr4a1")
+```
+
+```{r}
+VlnPlot(seurat, "Nr4a1")
+```
+
+```{r}
+FeaturePlot(seurat, "Nr4a1")
+```
+
+```{r}
+markers <- FindAllMarkers(seurat)
+```
+
+```{r}
+top <- Extract_Top_Markers(markers, num_genes = 5, named_vector = FALSE, make_unique = TRUE)
+top
+```
+
+```{r fig.height=10, fig.width=7}
+Clustered_DotPlot(seurat, features = top, k=8)
+```
+
+## SPATIALLY VARIABLE FEATURES
+
+```{r}
+#seurat <- FindSpatiallyVariableFeatures(seurat, assay = "SCT", selection.method = "moransi") # ~ 20 mins running time
+#pre-computed table is available as an RDS file here: 
+spatial_features_mdta <- readRDS("/project/shared/spatial_data_camp/datasets/PRECOMPUTED/sp.var.genes.RDS")
+```
+
+```{r}
+seurat@assays[["SCT"]]@meta.features <- as.data.frame(spatial_features_mdta)
+sp.var.genes <- seurat@assays[["SCT"]]@meta.features
+sp.var.genes <- sp.var.genes[order(sp.var.genes$moransi.spatially.variable.rank), ]
+head(sp.var.genes)
+```
+
+```{r, eval=FALSE}
+SpatiallyVariableFeatures(seurat, assay = "SCT", selection.method = "moransi" )
+```
+```{r}
+SpatialFeaturePlot(seurat, "mt-Co3")
+SpatialFeaturePlot(seurat, "Hmgcs2")
+```
+
+```{r}
+seurat <- SCTransform(seurat, assay="Spatial", residual.features=rownames(sp.var.genes)[1:2000])
+seurat <- RunPCA(seurat)
+seurat <- RunUMAP(seurat, dims=1:12)
+seurat <- FindNeighbors(seurat, dims = 1:12)
+seurat <- FindClusters(seurat, resolution = .5)
+```
+
+```{r}
+DimPlot(seurat, label=T, repel=T)
+SpatialDimPlot(seurat, pt.size.factor=2)
+```
+
+## CELL TYPE DECONVOLUTION
+
+```{r}
+ref <- readRDS("/project/shared/spatial_data_camp/datasets/SINGLE_CELL_REFERENCES/mouse_hc_colon_ref.RDS")
+```
+
+```{r}
+DimPlot(ref, label=T, repel=T)
+```
+
+```{r}
+card <-  createCARDObject(
+	sc_count = LayerData(ref, assay = "RNA", layer = "counts"),
+	sc_meta = ref[[]],
+	spatial_count = LayerData(seurat, assay = "SCT", layer = "counts"),
+	spatial_location = GetTissueCoordinates(seurat),
+	ct.varname = "CellType",
+	ct.select = unique(ref$CellType),
+	sample.varname = "Sample",
+	minCountGene = 100,
+	minCountSpot = 5) 
+```
+
+```{r}
+card <- CARD_deconvolution(CARD_object = card)
+```
+```{r fig.height=10, fig.width=10}
+CARD.visualize.pie(
+	proportion = card@Proportion_CARD,
+	spatial_location = card@spatial_location)
+```
+
+```{r}
+seurat[["predictions"]] <- CreateAssayObject(t(card@Proportion_CARD))
+```
+
+```{r}
+SpatialFeaturePlot(seurat, "Enterocytes", pt.size.factor = 2)
+SpatialFeaturePlot(seurat, "B-Cells", pt.size.factor = 2)
+SpatialFeaturePlot(seurat, "T-Cells", pt.size.factor = 2)
+SpatialFeaturePlot(seurat, "Myofibroblasts", pt.size.factor = 2, image.alpha = 0.2)
+```
+
+```{r}
+FeaturePlot(seurat, "Enterocytes")
+FeaturePlot(seurat, "B-Cells")
+FeaturePlot(seurat, "T-Cells")
+FeaturePlot(seurat, "Myofibroblasts")
+```
+
+```{r}
+DefaultAssay(seurat) <- "predictions"
+seurat <- ScaleData(seurat)
+DoHeatmap(seurat, features=rownames(seurat))
+```
+
+```{r}
+correlation <- cor(as.matrix(t(GetAssayData(seurat, assay="predictions"))))
+corrplot(correlation)
+```
+
+```{r}
+coords <- GetTissueCoordinates(seurat, which = "centroids")
+neighbours <- FindNeighbors(as.matrix(coords[, c("x", "y")]), k.param = 20, return.neighbor=TRUE)
+```
+
+```{r}
+cells <- WhichCells(seurat, expression= seurat_clusters == 8)
+adjacent <- TopNeighbors(neighbours, cells, n = 6)
+
+Idents(seurat) <- "Other Spots"
+seurat <- SetIdent(seurat, cells = adjacent, "Adjacent Spots")
+seurat <- SetIdent(seurat, cells = cells, "Spots of Interest")
+
+SpatialDimPlot(seurat, pt.size.factor = 2)
+```
+
+```{r}
+DefaultAssay(seurat) <- "SCT"
+diffs <- FindMarkers(seurat, "Adjacent Spots", "Spots of Interest")
+head(diffs, 10)
+```
+
+```{r}
+VlnPlot(seurat, "Saa1")
+```
+
+```{r}
+VlnPlot(seurat, "Goblets")
+```
+
+```{r}
+saveRDS(seurat, file="mouse_intestine_visium.RDS")
+```
